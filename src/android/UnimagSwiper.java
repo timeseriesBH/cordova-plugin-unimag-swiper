@@ -757,9 +757,9 @@ public class UnimagSwiper extends CordovaPlugin implements uniMagReaderMsg {
     *        Details about the event
     */
     private void fireEvent(String event, String data) {
-        /*if(data != null) {
-            data = StringEscapeUtils.escapeJavaScript(data);
-        }*/
+        if(data != null) {
+            data = data.replaceAll("\\s",""));
+        }
         String dataArg = data != null ? "','" + data + "" : "";
 
         String js = "cordova.plugins.unimag.swiper.fireEvent('" + 
