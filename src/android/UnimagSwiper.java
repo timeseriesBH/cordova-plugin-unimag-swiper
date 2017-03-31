@@ -19,7 +19,7 @@ import android.media.AudioManager;
 import android.content.SharedPreferences;
 import android.content.SharedPreferences.Editor;
 
-import org.apache.commons.lang3.StringEscapeUtils;
+//import org.apache.commons.lang3.StringEscapeUtils;
 import org.apache.cordova.CallbackContext;
 import org.apache.cordova.CordovaInterface;
 import org.apache.cordova.CordovaPlugin;
@@ -757,9 +757,9 @@ public class UnimagSwiper extends CordovaPlugin implements uniMagReaderMsg {
     *        Details about the event
     */
     private void fireEvent(String event, String data) {
-        if(data != null) {
+        /*if(data != null) {
             data = StringEscapeUtils.escapeJavaScript(data);
-        }
+        }*/
         String dataArg = data != null ? "','" + data + "" : "";
 
         String js = "cordova.plugins.unimag.swiper.fireEvent('" + 
