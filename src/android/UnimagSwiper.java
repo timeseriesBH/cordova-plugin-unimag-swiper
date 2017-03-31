@@ -19,6 +19,7 @@ import android.media.AudioManager;
 import android.content.SharedPreferences;
 import android.content.SharedPreferences.Editor;
 
+import org.apache.commons.lang.StringEscapeUtils;
 import org.apache.cordova.CallbackContext;
 import org.apache.cordova.CordovaInterface;
 import org.apache.cordova.CordovaPlugin;
