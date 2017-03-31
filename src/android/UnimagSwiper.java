@@ -19,7 +19,6 @@ import android.media.AudioManager;
 import android.content.SharedPreferences;
 import android.content.SharedPreferences.Editor;
 
-//import org.apache.commons.lang3.StringEscapeUtils;
 import org.apache.cordova.CallbackContext;
 import org.apache.cordova.CordovaInterface;
 import org.apache.cordova.CordovaPlugin;
@@ -758,7 +757,7 @@ public class UnimagSwiper extends CordovaPlugin implements uniMagReaderMsg {
     */
     private void fireEvent(String event, String data) {
         if(data != null) {
-            data = data.replaceAll("\\s",""));
+            data = data.replaceAll("\\s","");
         }
         String dataArg = data != null ? "','" + data + "" : "";
 
