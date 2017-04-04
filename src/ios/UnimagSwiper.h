@@ -9,6 +9,8 @@
 
 - (void)swipe:(CDVInvokedUrlCommand*)command;
 
+- (void)stopSwipe:(CDVInvokedUrlCommand*)command;
+
 - (void)enableLogs:(CDVInvokedUrlCommand*)command;
 
 - (void)setReaderType:(CDVInvokedUrlCommand*)command;
