@@ -197,6 +197,29 @@ UmReader readerType;
 }
 
 /**
+* Tells the SDK to stop expecting a swipe.
+* 
+* @param {CDVInvokedUrlCommand*} command 
+*        The command sent from JavaScript
+*/
+- (void)stopSwipe:(CDVInvokedUrlCommand*)command {
+    [self.commandDelegate runInBackground:^{
+        CDVPluginResult* result;
+
+        if (reader) {
+            if ([reader getConnectionStatus]) {
+                [reader cancelTask];
+
+            } else result = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR
+                messageAsString:@"Reader has been activated but is not connected."];
+
+        } else result = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR
+            messageAsString:@"Reader must be activated before stopping swipe."];
+
+        [self.commandDelegate sendPluginResult:result callbackId:[command callbackId]];
+    }];
+}
+/**
 * Turns SDK logs on or off.
 * 
 * @param {CDVInvokedUrlCommand*} command 
