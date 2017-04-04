@@ -147,6 +147,8 @@ public class UnimagSwiper extends CordovaPlugin implements uniMagReaderMsg {
             deactivateReader(callbackContext);
         } else if ("swipe".equals(action)) {
             swipe(callbackContext);
+        } else if ("stopSwipe".equals(action)) {
+            stopSwipe(callbackContext);
         } else if ("enableLogs".equals(action)) {
             if (args.length() > 0) {
                 enableLogs(callbackContext, args.getBoolean(0));
@@ -261,7 +263,23 @@ public class UnimagSwiper extends CordovaPlugin implements uniMagReaderMsg {
             }
         } else callbackContext.error("Reader must be activated before starting swipe.");
     }
-
+    /**
+    * Tells the SDK to stop expecting a swipe.
+    * 
+    * @param callbackContext 
+    *        Used when calling back into JavaScript
+    */
+    private void stopSwipe(final CallbackContext callbackContext) {
+        if (reader != null && !autoConfigRunning) {
+            if (readerConnected == true) {
+                cancelSwipe();
+            } else {
+                // Expected behavior if a disconnection event has been 
+                // fired or swiper has never been connected.
+                callbackContext.error("Reader has been activated but is not connected.");
+            }
+        } else callbackContext.error("Reader must be activated before stopping swipe.");
+    }
     /**
     * Turns SDK logs on or off.
     * 
