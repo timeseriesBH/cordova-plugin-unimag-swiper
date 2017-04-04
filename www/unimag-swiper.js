@@ -32,6 +32,10 @@ Swiper.swipe = function (success, error) {
 	exec(success, error, 'UnimagSwiper', 'swipe', []);
 };
 
+Swiper.stopSwipe = function (success, error) {
+	exec(success, error, 'UnimagSwiper', 'stopWwipe', []);
+};
+
 Swiper.enableLogs = function (enable, success, error) {
 	exec(success, error, 'UnimagSwiper', 'enableLogs', [enable]);
 };
