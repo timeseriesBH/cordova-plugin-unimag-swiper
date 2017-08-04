@@ -1,79 +1,101 @@
-package nl.timeseries.plugin.pm80;
+package com.wodify.cordova.plugin.unimagswiper;
 
-import org.apache.cordova.*;
+import java.io.File;
+import java.io.InputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import org.json.JSONObject;
+import org.json.JSONArray;
+import org.json.JSONException;
+
+import android.os.Build;
+import android.content.BroadcastReceiver;
+import android.content.Intent;
+import android.content.Context;
+import android.content.IntentFilter;
+import android.media.AudioManager;
+import android.content.SharedPreferences;
+import android.content.SharedPreferences.Editor;
+
 import org.apache.cordova.CallbackContext;
 import org.apache.cordova.CordovaInterface;
 import org.apache.cordova.CordovaPlugin;
 import org.apache.cordova.CordovaWebView;
-import org.json.*;
 
-import java.lang.*;
+import IDTech.MSR.XMLManager.StructConfigParameters;
+import IDTech.MSR.uniMag.uniMagReader;
+import IDTech.MSR.uniMag.uniMagReaderMsg;
+import IDTech.MSR.uniMag.uniMagReader.ReaderType;
 
-import java.security.Key;
+/**
+* This plugin utilizes a Broadcast Receivers to allow for swiping a credit or
+* debit card and returning its parsed data for use in financial transactions.   
+*/
+public class UnimagSwiper extends CordovaPlugin implements uniMagReaderMsg {
 
-import javax.crypto.Cipher;
-import javax.crypto.spec.SecretKeySpec;
-import android.Dukpt;
-import android.content.Context;
-import android.util.Log;
-import android.content.BroadcastReceiver;
-import android.content.Context;
-import android.content.Intent;
-import android.content.IntentFilter;
-
-import device.common.MsrIndex;
-import device.common.MsrResult;
-import device.common.MsrResultCallback;
-import device.sdk.MsrManager;
-import device.sdk.ScanManager;
-import device.common.DecodeResult;
-import device.common.ScanConst;
-
-public class PM80 extends CordovaPlugin {
-    private static final String TAG="MSR";
     // Reference to application context for construction and resource purposes
     private Context context;
-    /* read state */
-    public static final int READ_SUCCESS=0;
-    public static final int READ_FAIL=1;
-    public static final int READ_READY=2;
 
-    private static MsrManager mMsr = null;
-    private MsrResult mDetectResult = null;
-    private static ScanManager mScan = null;
-    private static DecodeResult mDecodeResult;
-    private final ScanResultReceiver scanResultReceiver = new ScanResultReceiver();
-    private int origScanResultType = 0;
+    // Broadcast receiver to detect headset events
+    private final HeadsetReceiver headsetReceiver = new HeadsetReceiver();
 
-    private String mTrack1;
-    private String mTrack2;
-    private String mTrack3;
+    // Auto Config profile to use for connection on unsupported device
+    private static StructConfigParameters profile = null;
 
-    private String mResult = null;
+    // Store name of file to retrieve and set Auto Config Profile
+    private final static String PROFILE_PREFS = "AutoConfigProfile";
 
-    private boolean readerActivated = false;
-    private boolean scannerActivated = true;
+    // Reader from SDK to handle all swipe functionality
+    private uniMagReader reader;
+
+    // Type of uniMagReader for initialization
+    private ReaderType readerType;
+
+    // Indicates if the containing app has not manually deactivated reader
+    private boolean readerActivated = false; 
+
+    // Indicates if the SDK has called its connection callback
+    private boolean readerConnected = false;
+
+    // Stores user preference, default false
+    private boolean enableLogs = false;
+
+    // Indicates if Auto Config process is running
+    private boolean autoConfigRunning = false;
+
+    // Regex to parse raw card data
+    private Pattern cardParserPtrn = null;
+
 
     /***************************************************
-     * LIFECYCLE
-     ***************************************************/
+    * LIFECYCLE
+    ***************************************************/
+
 
     /**
-     * Called after plugin construction and fields have been initialized.
-     */
+    * Called after plugin construction and fields have been initialized.
+    */
     @Override
-    public void initialize(CordovaInterface cordova,CordovaWebView webView){
-        super.initialize(cordova,webView);
-        mDetectResult = new MsrResult();
+    public void initialize(CordovaInterface cordova, CordovaWebView webView) {
+
+        super.initialize(cordova, webView);
+
+        context = this.cordova.getActivity().getApplicationContext();
+
+        cardParserPtrn = Pattern.compile("%B(\\d+)\\^([^\\^]+)\\^(\\d{4})");
+
+        loadAutoConfigProfile();
     }
 
     /**
-     * Called when the system is about to start resuming a previous activity.
-     * The reader is killed and MSR is unregistered.
-     *
-     * @param multitasking
-     *      Flag indicating if multitasking is turned on for app
-     */
+    * Called when the system is about to start resuming a previous activity.
+    * The reader is killed and Headset Receiver is unregistered.
+    * 
+    * @param multitasking
+    *      Flag indicating if multitasking is turned on for app
+    */
     @Override
     public void onPause(boolean multitasking) {
         super.onPause(multitasking);
@@ -81,18 +103,15 @@ public class PM80 extends CordovaPlugin {
         if (readerActivated) {
             deactivateReader(null);
         }
-        if (scannerActivated) {
-            deactivateScanner(null);
-        }
     }
 
     /**
-     * Called when the activity will start interacting with the user.
-     * The reader is reinitialized as if the app was just opened.
-     *
-     * @param multitasking
-     *      Flag indicating if multitasking is turned on for app
-     */
+    * Called when the activity will start interacting with the user.
+    * The reader is reinitialized as if the app was just opened.
+    * 
+    * @param multitasking
+    *      Flag indicating if multitasking is turned on for app
+    */
     @Override
     public void onResume(boolean multitasking) {
         super.onResume(multitasking);
@@ -100,388 +119,625 @@ public class PM80 extends CordovaPlugin {
         if (readerActivated) {
             activateReader(null);
         }
-        if (scannerActivated) {
-            activateScanner(null);
-        }
     }
 
+
     /***************************************************
-     * JAVASCRIPT INTERFACE IMPLEMENTATION
-     ***************************************************/
+    * JAVASCRIPT INTERFACE IMPLEMENTATION
+    ***************************************************/
+
 
     /**
-     * Executes the request sent from JavaScript.
-     *
-     * @param action
-     *      The action to execute.
-     * @param args
-     *      The exec() arguments in JSON form.
-     * @param command
-     *      The callback context used when calling back into JavaScript.
-     * @return
-     *      Whether the action was valid.
-     */
+    * Executes the request sent from JavaScript.
+    *
+    * @param action
+    *      The action to execute.
+    * @param args
+    *      The exec() arguments in JSON form.
+    * @param command
+    *      The callback context used when calling back into JavaScript.
+    * @return
+    *      Whether the action was valid.
+    */
     @Override
     public boolean execute(final String action, JSONArray args, final CallbackContext callbackContext) throws JSONException {
-        if("MSR_activateReader".equals(action)){
+        if ("activateReader".equals(action)) {
             activateReader(callbackContext);
-        } else if("MSR_deactivateReader".equals(action)){
+        } else if ("deactivateReader".equals(action)) {
             deactivateReader(callbackContext);
-        } else if("MSR_swipe".equals(action)){
+        } else if ("swipe".equals(action)) {
             swipe(callbackContext);
-        } else if("MSR_stopSwipe".equals(action)){
+        } else if ("stopSwipe".equals(action)) {
             stopSwipe(callbackContext);
-        } else if("SCAN_activateScanner".equals(action)){
-            activateScanner(callbackContext);
-        } else if("SCAN_deactivateScanner".equals(action)){
-            deactivateScanner(callbackContext);
+        } else if ("enableLogs".equals(action)) {
+            if (args.length() > 0) {
+                enableLogs(callbackContext, args.getBoolean(0));
+            } else callbackContext.error("Boolean 'enable' not specified.");
+        } else if ("setReaderType".equals(action)) {
+            if (args.length() > 0) {
+                setReaderType(callbackContext, args.getString(0));
+            } else callbackContext.error("Reader type not specified.");
+        } else if ("autoConfig".equals(action)) {
+            autoConfig(callbackContext);
         } else {
             // Method not found.
             return false;
         }
+
         return true;
     }
 
     /**
-     * Starts listen to SDK events for connection, disconnection, swiping, etc.
-     *
-     * @param callbackContext
-     *        Used when calling back into JavaScript
-     */
-    private void activateReader(final CallbackContext callbackContext){
+    * Initializes registers the Headset Receiver for headset detection, and starts
+    * listen to SDK events for connection, disconnection, swiping, etc.
+    * 
+    * @param callbackContext 
+    *        Used when calling back into JavaScript
+    */
+    private void activateReader(final CallbackContext callbackContext) {
         String callbackContextMsg = null;
 
-        try{
-            mMsr = new MsrManager();
-            if(mMsr != null){
-                mMsr.DeviceMsrOpen(mCallback);
-            }
-            mTrack1 = new String();
-            mTrack2 = new String();
-            mTrack3 = new String();
+        // This intent detects when something is plugged in or removed from the headset.
+        IntentFilter headsetFilter = new IntentFilter(Intent.ACTION_HEADSET_PLUG);
 
-            if(callbackContext != null){
+        // Check if we're running on Android 5.0 or higher
+        if (Build.VERSION.SDK_INT >= 21) {
+            // AudioManager.ACTION_HEADSET_PLUG preferred to Intent.ACTION_HEADSET_PLUG
+            // on Lollipop and above
+            headsetFilter = new IntentFilter(AudioManager.ACTION_HEADSET_PLUG);
+        } else headsetFilter = new IntentFilter(Intent.ACTION_HEADSET_PLUG);
+
+        try {
+            context.registerReceiver(headsetReceiver, headsetFilter);
+
+            if (callbackContext != null) {
                 readerActivated = true;
-            } else {
-                fireEvent("reader_reactivated");
             }
         } catch(IllegalArgumentException e){
             e.printStackTrace();
-            callbackContextMsg = "Failed to activate reader";
+            // If we're not going to be able to detect via hardware whether
+            // the swipe is plugged in, we can't continue.
+            callbackContextMsg = "Failed to activate reader - " +
+            "Unable to register headset receiver.";
         }
-        sendCallback(callbackContext,callbackContextMsg);
-    }
 
-    private void deactivateReader(final CallbackContext callbackContext){
-        try{
-            mMsr.DeviceMsrClose();
-            mMsr = null;
-            if(callbackContext != null){
+        sendCallback(callbackContext, callbackContextMsg);
+    } 
+
+    /**
+    * Because this unregisters the Headset Receiver, headset events will no 
+    * longer be detected after calling this, thus swiper will no longer 
+    * connect until activateReader is called again by the containing app,
+    * unless this is called by onPause.
+    * 
+    * @param callbackContext 
+    *        Used when calling back into JavaScript
+    */
+    private void deactivateReader(final CallbackContext callbackContext) {
+        try {
+            context.unregisterReceiver(headsetReceiver);
+
+            stopUnimagSwiper();
+
+            if (callbackContext != null) {
                 readerActivated = false;
             }
         } catch(IllegalArgumentException e){
+            // The only reason we could not unregister the Headset 
+            // Receiver is that it was not registered in the first 
+            // place (i.e., reader is already deactivated). Thus, we
+            // don't really care about this exception, our callback
+            // will always be for success.
             e.printStackTrace();
         }
 
-        sendCallback(callbackContext,null);
+        sendCallback(callbackContext, null);
     }
-    /**
-     * Tells the SDK to begin expecting a swipe. From the moment this is
-     * called, the user will have 30 seconds to swipe the card before a
-     * timeout error occurs.
-     *
-     * @param callbackContext
-     *        Used when calling back into JavaScript
-     */
-    private void swipe(final CallbackContext callbackContext) {
-        if(mMsr != null) {
-            if (mMsr.DeviceMsrStartRead() == 0) {
-                // If we get this far, we can expect events for card
-                // processing and card data received if a card is
-                // actually swiped, otherwise we can expect a timeout
-                // event.
-                callbackContext.success();
-            } else {
-                // Unexpected error
-                callbackContext.error("Failed to start swipe.");
-            }
 
+    /**
+    * Tells the SDK to begin expecting a swipe. From the moment this is
+    * called, the user will have 30 seconds to swipe the card before a 
+    * timeout error occurs.
+    * 
+    * @param callbackContext 
+    *        Used when calling back into JavaScript
+    */
+    private void swipe(final CallbackContext callbackContext) {
+        if (reader != null && !autoConfigRunning) {
+            if (readerConnected == true) {
+                cancelSwipe();
+                if (reader.startSwipeCard()) {
+                    // If we get this far, we can expect events for card
+                    // processing and card data received if a card is 
+                    // actually swiped, otherwise we can expect a timeout
+                    // event.
+                    callbackContext.success();
+                } else {
+                    // Unexpected error
+                    callbackContext.error("Failed to start swipe.");
+                }
+            } else {
+                // Expected behavior if a disconnection event has been 
+                // fired or swiper has never been connected.
+                callbackContext.error("Reader has been activated but is not connected.");
+            }
         } else callbackContext.error("Reader must be activated before starting swipe.");
     }
     /**
-     * Tells the SDK to stop expecting a swipe.
-     *
-     * @param callbackContext
-     *        Used when calling back into JavaScript
-     */
+    * Tells the SDK to stop expecting a swipe.
+    * 
+    * @param callbackContext 
+    *        Used when calling back into JavaScript
+    */
     private void stopSwipe(final CallbackContext callbackContext) {
-        if(mMsr != null) {
-            mMsr.DeviceMsrStopRead();
+        if (reader != null && !autoConfigRunning) {
+            if (readerConnected == true) {
+                cancelSwipe();
+            } else {
+                // Expected behavior if a disconnection event has been 
+                // fired or swiper has never been connected.
+                callbackContext.error("Reader has been activated but is not connected.");
+            }
         } else callbackContext.error("Reader must be activated before stopping swipe.");
+    }
+    /**
+    * Turns SDK logs on or off.
+    * 
+    * @param callbackContext 
+    *        Used when calling back into JavaScript
+    * @param enabled
+    *        True if logs should print.
+    */
+    private void enableLogs(final CallbackContext callbackContext, boolean enabled) {
+        // Store preference
+        enableLogs = enabled;
+
+        // Apply preference now if possible, otherwise it will be
+        // applied when swiper is started
+        if (reader != null && !autoConfigRunning) {
+            reader.setVerboseLoggingEnable(enableLogs);
+        }
+
+        callbackContext.success("Logging " + (enableLogs ? "en" : "dis") + "abled.");
     }
 
     /**
-     * @param callbackContext
+    * Restarts swiper with specified reader type if valid.
+    * Not necessary, but could help when troubleshooting.
+    * 
+    * @param callbackContext 
+    *        Used when calling back into JavaScript
+    * @param type
+    *        Type of reader to set
+    */
+    private void setReaderType(final CallbackContext callbackContext, String type) {
+        try {
+            readerType = ReaderType.valueOf(type);
+
+            // Apply type now if possible, otherwise it will be
+            // applied when swiper is started.
+            if (reader != null && !autoConfigRunning) {
+                stopUnimagSwiper();
+                startUnimagSwiper();
+            }
+
+            callbackContext.success("Reader type set as '" + readerType.name() + "'.");
+        } catch (IllegalArgumentException e) {
+            e.printStackTrace();
+            callbackContext.error("Reader type '" + type + "' invalid.");
+        }
+    }
+
+    /** 
+     * Starts Auto Config process to find a profile that can be 
+     * used for connection on an unsupported device.
+     *
+     * @param callbackContext 
      *        Used when calling back into JavaScript
      */
-    private void activateScanner(final CallbackContext callbackContext){
-        String callbackContextMsg = null;
-        if (context == null) context = this.cordova.getActivity().getApplicationContext();
-        try{
-
-            mScan = new ScanManager();
-            mDecodeResult = new DecodeResult();
-            if(mScan != null){
-                mScan.aDecodeAPIInit();
-                origScanResultType = mScan.aDecodeGetResultType();
-                mScan.aDecodeSetResultType(ScanConst.ResultType.DCD_RESULT_USERMSG);
-                IntentFilter intentFilter = new IntentFilter(ScanConst.INTENT_USERMSG);
-                try {
-                    context.registerReceiver(scanResultReceiver, intentFilter);
-                } catch(IllegalArgumentException e){
-                    e.printStackTrace();
-                    // If we're not going to be able to detect via hardware whether
-                    // the swipe is plugged in, we can't continue.
-                    callbackContextMsg = "Unable to register ScanReceiver.";
-                }
-            }
-
-            if(callbackContext != null){
-                scannerActivated = true;
-            } else {
-                fireEvent("scanner_reactivated");
-            }
-        } catch(IllegalArgumentException e){
-            e.printStackTrace();
-            callbackContextMsg = "Failed to activate scanner";
+    private void autoConfig(final CallbackContext callbackContext) {
+        if (reader == null) {
+            startUnimagSwiper();
         }
-        sendCallback(callbackContext,callbackContextMsg);
-    }
-    private void deactivateScanner(final CallbackContext callbackContext){
-        try{
-            context.unregisterReceiver(scanResultReceiver);
-            mScan.aDecodeSetResultType(origScanResultType);
-            mScan.aDecodeAPIDeinit();
-            mScan = null;
-            if(callbackContext != null){
-                scannerActivated = false;
-            }
-        } catch(IllegalArgumentException e){
-            e.printStackTrace();
-        }
+        if (!autoConfigRunning) {
+            cancelSwipe();
 
-        sendCallback(callbackContext,null);
-    }
-    /***************************************************
-     * SDK CALLBACKS
-     ***************************************************/
-    MsrResultCallback mCallback = new MsrResultCallback() {
-        @Override
-        public void onResult(int cmd, int status) {
-            int track1result = (status >> 8) & 0x1;
-            int track2result = (status >> 8) & 0x2;
-            int track3result = (status >> 8) & 0x4;
-            boolean track1Success = track1result == 0;
-            boolean track2Success = track2result == 0;
-            boolean track3Success = track3result == 0;
+            String file = getXMLConfigFile();
 
-            int readstatus = status & 0xff;
-            if (readstatus == 0) {
-                GetResult();
-                String message;
-                if(!track1Success) mTrack1 = "";
-                if(!track2Success) mTrack2 = "";
-                if(!track3Success) mTrack3 = "";
-                message = "{\"Track1\":{\"Success\":" + track1Success + ",\"Content\":\"" + mTrack1 + "\"},"
-                        + "\"Track2\":{\"Success\":" + track2Success + ",\"Content\":\"" + mTrack2 + "\"},"
-                        + "\"Track3\":{\"Success\":" + track3Success + ",\"Content\":\"" + mTrack3 + "\"}}";
-                fireEvent("swipe_success", message);
-            } else {
-                fireEvent("swipe_failed",errormsg(status, readstatus));
-            }
-            mTrack1 = new String();
-            mTrack2 = new String();
-            mTrack3 = new String();
-        }
-    };
-    private class ScanResultReceiver extends BroadcastReceiver {
-        @Override
-        public void onReceive(Context context, Intent intent) {
-            if (mScan != null) {
-                mScan.aDecodeGetResult(mDecodeResult.recycle());
-                String message;
-                if( mDecodeResult.symName.equals("READ_FAIL")) {
-                    message = "{\"Success\": false }";
-                }
-                else{
-                    message = "{\"Success\": true,"
-                            +"\"Type\":\"" + mDecodeResult.symName + "\","
-                            + "\"Data\":\"" + mDecodeResult.toString() + "\"}";
-                }
-                fireEvent("scan_result", message);
-            }
-        }
+            if (reader.startAutoConfig(file, true)) {
+                autoConfigRunning = true;
+
+                callbackContext.success();
+            } else callbackContext.error("Failed to start Auto Config.");
+        } else callbackContext.error("Auto Config is already running.");
     }
 
     /***************************************************
-     * UTILS
-     ***************************************************/
+    * SDK CALLBACKS
+    ***************************************************/
 
-    String errormsg(int track, int status)
-    {
-        String msg = new String();
-        if (status == MsrIndex.MMD1000_READ_OK) {
-            msg = "Success";
-            if ((track&0x600) == 0x600) {
-                msg += " part(Track2,3 fail)";
-            } else if ((track&0x500) == 0x500) {
-                msg += " part(Track1,3 fail)";
-            } else if ((track&0x300) == 0x300) {
-                msg += " part(Track1,2 fail)";
-            } else if ((track&0x100) == 0x100) {
-                msg += " part(track1 fail)";
-            } else if ((track&0x200) == 0x200) {
-                msg += " part(track2 fail)";
-            } else if ((track&0x400) == 0x400) {
-                msg += " part(track3 fail)";
-            }
-            else {
-                msg += " all";
-            }
+
+    /**
+    * Receive messages from the SDK when the device is powering up.
+    * Can result in a timeout rather than an actual connection.
+    */
+    @Override
+    public void onReceiveMsgToConnect() {
+        fireEvent("connecting");
+    }
+
+    /**
+    * Receive messages from the SDK when the swiper is connected to
+    * the device. Swipe cannot be performed until this has been called.
+    */
+    @Override
+    public void onReceiveMsgConnected() {
+        readerConnected = true;
+        fireEvent("connected");
+    }
+
+    /**
+    * Receive messages from the SDK when the swiper becomes disconnected
+    * from the device. 
+    */
+    @Override
+    public void onReceiveMsgDisconnected() {
+        readerConnected = false;
+        autoConfigRunning = false;
+        fireEvent("disconnected"); 
+    }
+
+    /**
+    * Receive messages from the SDK when powerup, card swipe mode, or 
+    * auto config is timed out. However, we cannot distinguish between
+    * the former two timeouts without utilizing a stopwatch, which is 
+    * probably overkill considering the timeout message, but may 
+    * eventually be implemented. Auto config timeouts will be handled
+    * separately.
+    * 
+    * @param strTimeoutMsg 
+    *        Message from the SDK
+    */
+    @Override
+    public void onReceiveMsgTimeout(String strTimeoutMsg) {
+        if (autoConfigRunning) {
+            autoConfigRunning = false;
+            fireEvent("autoconfig_error", strTimeoutMsg);
+        } else fireEvent("timeout", strTimeoutMsg);
+    }
+
+    /**
+    * Receive messages from the SDK as soon as it detects data coming 
+    * from the swiper after startSwipeCard() API method is called.
+    */
+    @Override
+    public void onReceiveMsgProcessingCardData() {
+        fireEvent("swipe_processing");
+    }
+
+    /**
+    * Receive messages from the SDK with raw swiped card data and parse it.
+    * 
+    * @param flagOfCardData 
+    *        Indicates format of cardData
+    * @param cardData
+    *        Raw card data to be parsed
+    */
+    @Override
+    public void onReceiveMsgCardData(byte flagOfCardData, byte[] cardData) {
+        cancelSwipe();
+        
+        fireEvent("swipe_success", new String(cardData));
+        JSONObject card = parseCardData(new String(cardData));
+        /*if (card != null) {
+            fireEvent("swipe_success", card.toString());   
+        } else fireEvent("swipe_error");*/
+    }
+
+    /**
+    * Receive messages from the SDK upon failure loading the XML file.
+    * @param index      
+    *        Identifier for failure type.
+    * @param strMessage
+    *        Description of error.
+    */
+    @Override
+    public void onReceiveMsgFailureInfo(int index, String strMessage) {
+        // Possible errors:
+        //      - This phone model is not supported by the SDK.
+        //      - Wrong XML file name.
+        //      - XML file does not exist.
+        //      - Cannot initialize XML file.
+        //      - Failed to read XML file.
+        //      - Can't download XML file.
+        //      - Failed to increase media volume.
+        //          NOTE: This can occur after starting
+        //          Auto Config.
+        fireEvent("xml_error", strMessage);
+    }
+
+    /**
+    * Grant permissions for the SDK to do certain tasks.
+    * @param  nType
+    *         Task type
+    * @param  strMessage
+    *         Task description
+    * @return
+    *         True if task is identifiable
+    */
+    @Override 
+    public boolean getUserGrant(int nType, String strMessage) {
+        switch (nType)
+        {
+            case uniMagReaderMsg.typeToPowerupUniMag:
+                // Let SDK to start powering up UniMag when
+                // reader is plugged into the headphone jack
+            case uniMagReaderMsg.typeToUpdateXML:
+                // Let SDK download the latest configuration
+                // file (.XML) from the IDTech web server if
+                // mobile device has not yet been configured
+            case uniMagReaderMsg.typeToOverwriteXML:
+                // Let SDK download the latest configuration
+                // file and overwrite existing file in the 
+                // local storage
+            case uniMagReaderMsg.typeToReportToIdtech:
+                // Let SDK report an issue to IDTech when a 
+                // mobile phone is not supported
+                return true;
+            default:
+                return false;
         }
-        else {
-            switch(status) {
-                case MsrIndex.MMD1000_READ_ERROR:
-                    msg = "Read failed";
-                    break;
-                case MsrIndex.MMD1000_CRC_ERROR:
-                    msg = "CRC error in encryption related information stored in OTP";
-                    break;
-                case MsrIndex.MMD1000_NOINFOSTORE:
-                    msg = "No information stored in OTP related to encryption";
-                    break;
-                case MsrIndex.MMD1000_AES_INIT_NOT_SET:
-                    msg = "AES initial vector is not set yet";
-                    break;
-                case MsrIndex.MMD1000_READ_PREAMBLE_ERROR
-                    msg = "Preamble error in card read data";
-                    break;
-                case MsrIndex.MMD1000_READ_POSTAMBLE_ERROR:
-                    msg = "Postamble error in card read data";
-                    break;
-                case MsrIndex.MMD1000_READ_LRC_ERROR:
-                    msg = "LRC error in card read data";
-                    break;
-                case MsrIndex.MMD1000_READ_PARITY_ERROR:
-                    msg = "Parity error in card read data";
-                    break;
-                case MsrIndex.MMD1000_BLANK_TRACK:
-                    msg = "Black track";
-                    break;
-                case MsrIndex.MMD1000_CMD_STXETX_ERROR:
-                    msg = "STX/ETX error in command communication";
-                    break;
-                case MsrIndex.MMD1000_CMD_UNRECOGNIZABLE:
-                    msg = "Class/Function un-recognizable in command";
-                    break;
-                case MsrIndex.MMD1000_CMD_BCC_ERROR:
-                    msg = "BCC error in command communication";
-                    break;
-                case MsrIndex.MMD1000_CMD_LENGTH_ERROR:
-                    msg = "Length error in command communication";
-                    break;
-                case MsrIndex.MMD1000_READ_NO_DATA:
-                    msg = "No data available to re-read";
-                    break;
-                case MsrIndex.MMD1000_DEVICE_READ_TIMEOUT:
-                    msg = "Read command timeout";
-                    break;
-                case MsrIndex.MMD1000_DEVICE_POWER_DISABLE:
-                    msg = "MMD1000 power is disable";
-                    break;
-                case MsrIndex.MMD1000_DEVICE_NOT_OPENED:
-                    msg = "MMD1000 function is not opened";
-                    break;
-                case MsrIndex.MMD1000_DEVICE_DATA_CLEARED:
-                    msg = "MMD1000 device result is cleared";
-                    break;
-                default:
-                    msg = "error";
-                    break;
+    }
+
+    /**
+     * Receive messages from SDK when Auto Config has completed.
+     * Note that just because Auto Config has completed does not mean it
+     * was successful, i.e., the profile found may still not work.
+     * @param profile 
+     *        Profile found by Auto Config, used to connect with
+     */
+    @Override
+    public void onReceiveMsgAutoConfigCompleted(StructConfigParameters profile) {
+        autoConfigRunning = false;
+        // Store profile locally
+        this.profile = profile;
+        
+        // Store profile in SharedPrefences for persistence
+        boolean storeSuccess = storeAutoConfigProfile(profile);
+
+        if (storeSuccess) {
+            fireEvent("autoconfig_completed");
+
+            // Totally reset reader to apply profile
+            deactivateReader(null);
+            activateReader(null);
+        } else fireEvent("autoconfig_error", "Failed to save profile.");
+    }
+
+    /***************************************************
+    * UNUSED SDK CALLBACKS
+    ***************************************************/
+
+
+    @Override
+    public void onReceiveMsgToSwipeCard() {}
+
+    @Override
+    public void onReceiveMsgCommandResult(int commandID, byte[] cmdReturn) {}
+
+    @Override
+    public void onReceiveMsgToCalibrateReader() {}
+
+    @Override
+    public void onReceiveMsgAutoConfigProgress(int progressValue) {}
+
+    @Override
+    public void onReceiveMsgAutoConfigProgress(int percent, double result, String profileName) {}
+
+    @Override
+    @Deprecated
+    public void onReceiveMsgSDCardDFailed(String strMSRData) {}
+
+
+    /***************************************************
+    * UTILS
+    ***************************************************/
+
+    /**
+    * Initializes uniMagReader object and configures its settings.
+    */
+    private void startUnimagSwiper() {
+        // If there is an existing uniMagReader object, kill it.
+        stopUnimagSwiper();
+
+        // Init with type if possible
+        if (readerType != null) {
+            reader = new uniMagReader(this, context, readerType);
+        } else reader = new uniMagReader(this, context);
+
+        // Begin listening to SDK events.
+        reader.registerListen();
+        reader.setVerboseLoggingEnable(enableLogs);
+        reader.setTimeoutOfSwipeCard(30); // seconds 
+
+        if (profile == null) {
+            // XML file is used by SDK to retrieve device-specific settings
+            // for the swiper. It is stored within this plugin's resources
+            // but may also be downloaded from the ID Tech web server.
+            reader.setXMLFileNameWithPath(getXMLConfigFile());
+            reader.loadingConfigurationXMLFile(false);
+        } else {
+            // Device is not supported and must use profile from Auto Config
+            reader.connectWithProfile(profile);
+        }
+    }
+    
+    /** 
+    * Releases uniMagReader object.
+    */
+    private void stopUnimagSwiper() {
+        if (reader != null) {
+            cancelSwipe();
+
+            // Stop listening to SDK events
+            reader.unregisterListen();
+            reader.release();
+            reader = null;
+
+            // Mock disconnection event
+            readerConnected = false;
+            fireEvent("disconnected");
+        }
+    }
+
+    /**
+    * Cancels a swipe if currently in swipe mode.
+    */
+    private void cancelSwipe() {
+        if(reader.isSwipeCardRunning()) {
+            reader.stopSwipeCard();
+        }
+    }
+
+    /**
+    * Uses a regex to parse raw card data.
+    * @param  data
+    *         Raw card data
+    * @return
+    *         Parsed card data or null if invalid
+    */
+    private JSONObject parseCardData(String data) {
+        Matcher mtchr = cardParserPtrn.matcher(data);
+
+        String num = null;
+        String[] name = new String[2];
+        String exp = null;
+
+        while (mtchr.find()) {
+            num = mtchr.group(1);
+            name = mtchr.group(2).split("/");
+            exp = mtchr.group(3);
+        } 
+
+        if (num != null && name[0] != null && name[1] != null && exp != null) {
+            try {
+                JSONObject cardData = new JSONObject();
+                cardData.put("card_number", num);
+                cardData.put("expiry_month", exp.substring(2));
+                cardData.put("expiry_year", exp.substring(0, 2));
+                cardData.put("first_name", name[1].trim());
+                cardData.put("last_name", name[0].trim());
+                cardData.put("trimmedUnimagData", data.replaceAll("\\s",""));
+
+                return cardData;
+            } catch (JSONException e) {
+                e.printStackTrace();
+                return null;
             }
-        }
-        return msg;
+        } else return null;
     }
 
+    /**
+    * Find path to XML configuration file for swiper.
+    * @return 
+    *     File name with path.
+    */
+    private String getXMLConfigFile() {
+        String fileName = "IDT_uniMagCfg.xml";
 
-    public boolean setUsedEncryption() {
-        byte[] keySerialNumber = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x00, 0x00, 0x00};
-        byte[] initialKey = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10};
-        return mMsr.setUsedEncryption(keySerialNumber, initialKey);
-    }
-    public byte[] getEncryptionData() {
-        return mMsr.getEncryptionData();
-    }
-    private byte[] getDukptKey() {
-        byte[] data = getEncryptionData();
-        byte[] initialKey = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10};
-        byte[] ksn = new byte[10];
-        for (int i = 0; i < 10; i++) {
-            ksn[i] = data[5 + i];
-        }
-        long tc = ((ksn[7] & 0x1f) << 16) | (ksn[8] & 0xff) <<8 | ksn[9] & 0xff;
-        return Dukpt.getKey(initialKey, ksn, tc);
-    }
-
-    private byte[] getDataFromEncryptionData() {
-        byte[] data = getEncryptionData();
-        int padLength = data[2] & 0xFF;
-        int dataLength = (((data[3] & 0xFF) << 8) | (data[4] & 0xFF)) + padLength - 10;
-        byte[] encryptedData = new byte[dataLength];
-        System.arraycopy(data, 15, encryptedData, 0, dataLength);
-        return encryptedData;
-    }
-    public byte[] getDecryptionData() {
-        byte[] decoded = null;
-        Cipher cipher = null;
         try {
-            cipher = Cipher.getInstance("AES/CBC/NoPadding");
-            Key keySpec = new SecretKeySpec(getDukptKey(), "AES");
-            cipher.init(Cipher.DECRYPT_MODE, keySpec);
-            decoded = cipher.doFinal(getDataFromEncryptionData());
+            int resId = context.getResources().getIdentifier("idt_unimagcfg","raw", 
+                                                    context.getPackageName());
+            InputStream in = context.getResources().openRawResource(resId);
+            byte [] buffer = new byte[in.available()];
+            in.read(buffer);
+            in.close();
+
+            context.deleteFile(fileName);
+
+            FileOutputStream out = context.openFileOutput(fileName, Context.MODE_PRIVATE);
+            out.write(buffer);
+            out.close();
+
+            File fileDir = context.getFilesDir();
+            String fileNameWithPath = fileDir.getParent() + File.separator + 
+                                        fileDir.getName() + File.separator + fileName;
+
+            File xmlConfigFile = new File(fileNameWithPath);
+            return xmlConfigFile.exists() ? fileNameWithPath : null;
         } catch (Exception e) {
             e.printStackTrace();
+            return null;
         }
-        return decoded;
     }
-    public void GetResult() {
-        if (mMsr != null) {
-            byte[] encryptionData = getEncryptionData();
-            if (encryptionData != null) {
-                String s = "";
-                for (byte b : encryptionData) {
-                    s += String.format("%02X", b);
-                }
-                // Encrypted data.
-                mTrack1 = s;
 
-                byte[] decryptionData = getDecryptionData();
-                s = "";
-                if (decryptionData != null) {
-                    for (byte b : decryptionData) {
-                        s += String.format("%02X", b);
-                    }
-                }
-                // Decrypted data.
-                mTrack2 = s;
-            } else {
-                mDetectResult = mMsr.DeviceMsrGetData(0x07);
-                mTrack1 = mDetectResult.getMsrTrack1();
-                mTrack2 = mDetectResult.getMsrTrack2();
-                mTrack3 = mDetectResult.getMsrTrack3();
-            }
+    /**
+     * Store profile retrieved by Auto Config process in SharedPreferences so
+     * it can be loaded each time app is opened.
+     *
+     * @param profile
+     *        Profile from Auto Config
+     * @return
+     *         True if store was successful
+     */
+    private boolean storeAutoConfigProfile(StructConfigParameters profile) {
+        // Check that profile is valid
+        if (profile == null) {
+            return false;
+        }
+
+        // Create or open SharedPreferences file
+        SharedPreferences.Editor profileEditor = context.getSharedPreferences(PROFILE_PREFS, Context.MODE_PRIVATE).edit();
+
+        profileEditor.putInt("direction_output_wave", profile.getDirectionOutputWave());
+        profileEditor.putInt("frequence_input", profile.getFrequenceInput());
+        profileEditor.putInt("frequence_output", profile.getFrequenceOutput());
+        profileEditor.putInt("record_buffer_size", profile.getRecordBufferSize());
+        profileEditor.putInt("record_read_buffer_size", profile.getRecordReadBufferSize());
+        profileEditor.putInt("wave_direction", profile.getWaveDirection());
+        profileEditor.putInt("high_threshold", profile.gethighThreshold());
+        profileEditor.putInt("low_threshold", profile.getlowThreshold());
+        profileEditor.putInt("min", profile.getMin());
+        profileEditor.putInt("max", profile.getMax());
+        profileEditor.putInt("baud_rate", profile.getBaudRate());
+        profileEditor.putInt("pre_amble_factor", profile.getPreAmbleFactor());
+        profileEditor.putInt("shuttle_channel", profile.getShuttleChannel() & 0xff);
+        profileEditor.putInt("force_headset_plug", profile.getForceHeadsetPlug());
+        profileEditor.putInt("use_voice_recognition", profile.getUseVoiceRecognition());
+        profileEditor.putInt("volume_level_adjust", profile.getVolumeLevelAdjust());
+
+        return profileEditor.commit();
+    }
+
+    /**
+     * Loads profile retrieved by Auto Config process into app via 
+     * SharedPreferences.
+     */
+    private void loadAutoConfigProfile() {
+        SharedPreferences profilePrefs = context.getSharedPreferences(PROFILE_PREFS, Context.MODE_PRIVATE);
+
+        if (profilePrefs.getInt("frequence_input", 0) != 0) {
+            profile = new StructConfigParameters();
+
+            profile.setDirectionOutputWave((short) profilePrefs.getInt("direction_output_wave", 0));
+            profile.setFrequenceInput(profilePrefs.getInt("frequence_input", 0));
+            profile.setFrequenceOutput(profilePrefs.getInt("frequence_output", 0));
+            profile.setRecordBufferSize(profilePrefs.getInt("record_buffer_size", 0));
+            profile.setRecordReadBufferSize(profilePrefs.getInt("record_read_buffer_size", 0));
+            profile.setWaveDirection(profilePrefs.getInt("wave_direction", 0));
+            profile.sethighThreshold((short) profilePrefs.getInt("high_threshold", 0));
+            profile.setlowThreshold((short) profilePrefs.getInt("low_threshold", 0));
+            profile.setMin((short) profilePrefs.getInt("min", 0));
+            profile.setMax((short) profilePrefs.getInt("max", 0));
+            profile.setBaudRate(profilePrefs.getInt("baud_rate", 0));
+            profile.setPreAmbleFactor((short) profilePrefs.getInt("pre_amble_factor", 0));
+            profile.setShuttleChannel((byte) profilePrefs.getInt("shuttle_channel", 0));
+            profile.setForceHeadsetPlug((short) profilePrefs.getInt("force_headset_plug", 0));
+            profile.setUseVoiceRecognition((short) profilePrefs.getInt("use_voice_recognition", 0));
+            profile.setVolumeLevelAdjust((short) profilePrefs.getInt("volume_level_adjust", 0));
         }
     }
+
     /**
      * Perform either a success or error callback on given CallbackContext
      * depending on state of msg.
@@ -490,7 +746,6 @@ public class PM80 extends CordovaPlugin {
      * @param msg
      *        Error message, or null if success
      */
-
     private void sendCallback(CallbackContext callbackContext, String msg) {
         // callbackContext will only be null when caller called from
         // lifecycle methods (i.e., never from containing app).
@@ -502,32 +757,73 @@ public class PM80 extends CordovaPlugin {
     }
 
     /**
-     * Pass event to method overload.
-     *
-     * @param event
-     *        The event name
-     */
+    * Pass event to method overload.
+    * 
+    * @param event
+    *        The event name
+    */
     private void fireEvent(String event) {
         fireEvent(event, null);
     }
 
     /**
-     * Format and send event to JavaScript side.
-     *
-     * @param event
-     *        The event name
-     * @param data
-     *        Details about the event
-     */
+    * Format and send event to JavaScript side.
+    * 
+    * @param event
+    *        The event name
+    * @param data
+    *        Details about the event
+    */
     private void fireEvent(String event, String data) {
         if(data != null) {
             data = data.replaceAll("\\s","");
         }
         String dataArg = data != null ? "','" + data + "" : "";
 
-        String js = "cordova.plugins.PM80.fireEvent('" +
-                event + dataArg + "');";
+        String js = "cordova.plugins.unimag.swiper.fireEvent('" + 
+                        event + dataArg + "');";
 
         webView.sendJavascript(js);
+    }
+
+
+    /***************************************************
+    * HEADSET RECEIVER CLASS
+    ***************************************************/
+
+
+    /**
+    * Broadcast Receiver implementation used to detect headset events.
+    */
+    private class HeadsetReceiver extends BroadcastReceiver
+    {
+        /**
+        * Will be called upon app startup if the swiper is plugged in and 
+        * whenever something is plugged into or unplugged from the headset jack.
+        * @param context 
+        *        The context in which the receiver is running
+        * @param intent  
+        *        The intent received
+        */
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            try {
+                String action = intent.getAction();
+
+                // Headset plugged in or removed
+                if (Intent.ACTION_HEADSET_PLUG.equals(action)) {
+                    if (intent.getIntExtra("state", 0) == 1) {
+                        // Swiper was plugged in
+                        startUnimagSwiper();
+                    } else {
+                        // Swiper was unplugged
+                        stopUnimagSwiper();
+                    }
+                }
+            } catch(Exception e) {
+                e.printStackTrace();
+                stopUnimagSwiper();
+            }
+        }
     }
 }
